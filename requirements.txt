@@ -1,5 +1,6 @@
 fastapi==0.115.2
 uvicorn==0.30.6
-essentia-tensorflow  # или essentia-tensorflow==2.1b6.dev1389 для фиксации
+essentia-tensorflow==2.1b6.dev1389
 numpy==1.26.4
 requests==2.32.3
+httpx==0.27.2
