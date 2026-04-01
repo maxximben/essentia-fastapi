@@ -6,7 +6,6 @@ import requests
 import tempfile
 import os
 import httpx
-from uuid import uuid4
 from typing import Dict, Any
 
 from essentia.standard import (
@@ -18,7 +17,6 @@ from essentia.standard import (
 
 app = FastAPI(title="Music Analysis Service")
 
-# ==================== ГЛОБАЛЬНЫЕ МОДЕЛИ (загружаются один раз) ====================
 musicnn_model = None
 musicnn_tags = None
 
@@ -29,13 +27,11 @@ discogs_tags = None
 
 @app.on_event("startup")
 def load_models():
-    """Загружаем все модели при старте приложения (один раз)"""
     global musicnn_model, musicnn_tags
     global discogs_embedding_model, discogs_classifier_model, discogs_tags
 
     print("🚀 Загрузка моделей...")
 
-    # MusiCNN
     with open("models/msd-musicnn-1.json", "r") as f:
         metadata = json.load(f)
     musicnn_tags = metadata["classes"]
@@ -44,7 +40,6 @@ def load_models():
         output="model/Sigmoid"
     )
 
-    # Discogs-EffNet
     with open("models/genre_discogs400-discogs-effnet-1.json", "r") as f:
         metadata = json.load(f)
     discogs_tags = metadata["classes"]
@@ -62,9 +57,7 @@ def load_models():
     print("✅ Все модели успешно загружены!")
 
 
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 def download_audio_from_url(url: str, timeout: int = 45) -> str:
-    """Скачивает аудио и возвращает путь к временному файлу"""
     print(f"📥 Скачивание: {url}")
     try:
         response = requests.get(url, stream=True, timeout=timeout)
@@ -84,7 +77,6 @@ def download_audio_from_url(url: str, timeout: int = 45) -> str:
 
 
 def analyze_musicnn(audio: np.ndarray) -> Dict[str, Any]:
-    """MusiCNN — возвращает все теги"""
     framewise = musicnn_model(audio)
     global_probs = np.mean(framewise, axis=0)
     tag_probs = {musicnn_tags[i]: float(global_probs[i]) for i in range(len(musicnn_tags))}
@@ -97,7 +89,6 @@ def analyze_musicnn(audio: np.ndarray) -> Dict[str, Any]:
 
 
 def analyze_discogs(audio: np.ndarray) -> Dict[str, Any]:
-    """Discogs-EffNet 400 тегов"""
     embeddings = discogs_embedding_model(audio)
     predictions = discogs_classifier_model(embeddings)
     global_probs = np.mean(predictions, axis=0)
@@ -111,96 +102,33 @@ def analyze_discogs(audio: np.ndarray) -> Dict[str, Any]:
     }
 
 
-# ==================== Pydantic модель запроса ====================
 class AnalyzeRequest(BaseModel):
+    job_id: str
     audio_url: str
     callback_url: str
 
 
-# ==================== ОСНОВНОЙ ENDPOINT ====================
 @app.post("/analyze")
 async def start_analysis(request: AnalyzeRequest, background_tasks: BackgroundTasks):
-    """Запускает анализ асинхронно и сразу возвращает job_id"""
-    job_id = str(uuid4())
-
     background_tasks.add_task(
         process_audio_with_callback,
         request.audio_url,
-        job_id,
+        request.job_id,
         request.callback_url,
     )
 
     return {
         "status": "accepted",
-        "job_id": job_id,
-        "message": "Анализ запущен (~30–40 сек). Результат будет отправлен на callback_url",
+        "job_id": request.job_id,
+        "message": "Анализ запущен. Результат будет отправлен на callback_url",
     }
 
-# ==================== СИНХРОННЫЙ ЭНДПОИНТ (возвращает результат сразу) ====================
 
-class AnalyzeSyncRequest(BaseModel):
-    audio_url: str
-
-
-@app.post("/analyze-sync")
-async def analyze_sync(request: AnalyzeSyncRequest):
-    """
-    Синхронный анализ аудио — результат возвращается сразу в ответе
-    (подходит для тестов и коротких треков, может работать долго)
-    """
-    job_id = str(uuid4())   # всё равно генерируем для совместимости логов
-
-    try:
-        # 1. Скачивание
-        audio_path = download_audio_from_url(request.audio_url)
-
-        # 2. Загрузка аудио
-        audio = MonoLoader(
-            filename=audio_path,
-            sampleRate=16000,
-            resampleQuality=4,
-        )()
-
-        audio_length = len(audio) / 16000.0
-
-        # 3. Анализ
-        musicnn_results = analyze_musicnn(audio)
-        discogs_results = analyze_discogs(audio)
-
-        # 4. Формируем ответ
-        return {
-            "status": "completed",
-            "job_id": job_id,
-            "audio_length_seconds": round(audio_length, 1),
-            "musicnn": musicnn_results,
-            "discogs": discogs_results,
-        }
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "status": "failed",
-                "job_id": job_id,
-                "error": str(e)
-            }
-        )
-
-    finally:
-        # чистим временный файл
-        if 'audio_path' in locals() and audio_path and os.path.exists(audio_path):
-            try:
-                os.unlink(audio_path)
-            except:
-                pass
-# ==================== ФОНОВАЯ ОБРАБОТКА ====================
 async def process_audio_with_callback(audio_url: str, job_id: str, callback_url: str):
     audio_path = None
     try:
-        # 1. Скачиваем файл
         audio_path = download_audio_from_url(audio_url)
 
-        # 2. Загружаем аудио ОДИН раз
         audio = MonoLoader(
             filename=audio_path,
             sampleRate=16000,
@@ -208,11 +136,9 @@ async def process_audio_with_callback(audio_url: str, job_id: str, callback_url:
         )()
         audio_length = len(audio) / 16000.0
 
-        # 3. Анализируем (модели уже загружены)
         musicnn_results = analyze_musicnn(audio)
         discogs_results = analyze_discogs(audio)
 
-        # 4. Формируем результат
         payload = {
             "job_id": job_id,
             "status": "completed",
@@ -222,7 +148,6 @@ async def process_audio_with_callback(audio_url: str, job_id: str, callback_url:
             "error": None,
         }
 
-        # 5. Отправляем webhook
         async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
             response = await client.post(callback_url, json=payload)
             response.raise_for_status()
@@ -230,29 +155,24 @@ async def process_audio_with_callback(audio_url: str, job_id: str, callback_url:
         print(f"✅ Webhook успешно отправлен (job {job_id})")
 
     except Exception as e:
+        print(f"❌ Ошибка в обработке job {job_id}: {repr(e)}")
+
         error_payload = {
             "job_id": job_id,
             "status": "failed",
             "error": str(e),
         }
+
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
-                await client.post(callback_url, json=error_payload)
+                response = await client.post(callback_url, json=error_payload)
+                response.raise_for_status()
+
             print(f"⚠️ Отправлена ошибка по webhook (job {job_id})")
-        except:
-            print(f"❌ Не удалось отправить даже ошибку по webhook: {e}")
-
-    finally:
-        # Удаляем временный файл
-        if audio_path and os.path.exists(audio_path):
-            try:
-                os.unlink(audio_path)
-            except:
-                pass
+        except Exception as webhook_error:
+            print(f"❌ Не удалось отправить даже ошибку по webhook: {repr(webhook_error)}")
 
 
-# ==================== Запуск ====================
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run(app, host="0.0.0.0", port=8000)
